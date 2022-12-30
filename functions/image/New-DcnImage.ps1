@@ -144,6 +144,9 @@
         [switch]$UseLastFullBackup,
         [string]$BackupFilePath,
         [switch]$CopyOnlyBackup,
+        [switch]$SimpleRecovery,
+        [switch]$ShrinkLog,
+        [switch]$OptimizeDisk,
         [string]$ExecuteSQLCommand,
         [string]$ExecuteSQLFile,
         [switch]$UseUncAdminPath,
@@ -365,7 +368,12 @@
                 Stop-PSFFunction -Message "You cannot enter multiple databases for the same backup file. Please just enter one"
             }
         }
-
+        if ($ShrinkLog){
+            if(-not $SimpleRecovery) {
+                Stop-PSFFunction -Message "We recommend you Enable Simple Recovery before Shrinking the logs" -Continue
+            }
+        }
+                
         if ($ExecuteSQLFile) {
             if (-not (Test-Path -Path $ExecuteSQLFile)) {
                 Stop-PSFFunction -Message "Could not find SQL file '$($ExecuteSQLFile)'" -Continue
@@ -664,9 +672,44 @@
                 }
             }
 
+            if ($SimpleRecovery) {
+                if ($PSCmdlet.ShouldProcess($tempDbName, "Setting Simple Recovery Mode")) {
+                    # Change Recovery Model
+                    try {
+                        $params = @{
+                            SqlInstance     = $DestinationSqlInstance
+                            SqlCredential   = $DestinationSqlCredential
+                            Database        = $tempDbName
+                            EnableException = $EnableException
+                        }
+                        Set-DbaDbRecoveryModel @params -RecoveryModel Simple -Confirm:$False
+                    }
+                    catch {
+                            Stop-PSFFunction -Message "Couldn't execute SimpleRecovery  on $DestinationSqlInstance.`n$($_)" -Target $tempDbName -ErrorRecord $_ -Continue
+                    }
+                }
+            }    
+            if ($ShrinkLog) {
+                if ($PSCmdlet.ShouldProcess($tempDbName, "Shrinking DB Log")) {
+                    # Shrink Log File
+                    try {
+                        $params = @{
+                            SqlInstance     = $DestinationSqlInstance
+                            SqlCredential   = $DestinationSqlCredential
+                            Database        = $tempDbName
+                            EnableException = $EnableException
+                        }
+                        Invoke-DbaDbShrink @params -FileType Log -ShrinkMethod TruncateOnly 
+                    }
+                    catch {
+                            Stop-PSFFunction -Message "Couldn't execute Shrink on $DestinationSqlInstance.`n$($_)" -Target $tempDbName -ErrorRecord $_ -Continue
+                    }
+                }
+            }
+
 
             if ($ExecuteSQLCommand) {
-                if ($PSCmdlet.ShouldProcess($tempDbName, "Executing SQL script")) {
+                if ($PSCmdlet.ShouldProcess($tempDbName, "Executing SQL script")) { 
                     # Execute SQL Script
                     try {
                         $params = @{
@@ -713,7 +756,7 @@
                     Stop-PSFFunction -Message "Couldn't detach database $db as $tempDbName on $DestinationSqlInstance" -Target $db -ErrorRecord $_ -Continue
                 }
             }
-
+           
             if ($PSCmdlet.ShouldProcess($vhdPath, "Dismounting the vhd")) {
                 # Dismount the vhd
                 try {
@@ -738,6 +781,33 @@
                 catch {
                     Stop-PSFFunction -Message "Couldn't dismount vhd" -Target $imageName -ErrorRecord $_ -Continue
                 }
+            }
+            if ($OptimizeDisk){
+                if ($PSCmdlet.ShouldProcess($vhdPath, "Optimizing the vhd")) {
+                    try {
+                        Write-PSFMessage -Message "Optimizing  vhd" -Level Verbose
+                        if ($computer.IsLocalhost) {
+                            # Optimize
+                            $CompactCommand='diskpart
+                                            select vdisk file='+$vhdpath+'
+                                            attach vdisk readonly
+                                            compact vdisk
+                                            detach vdisk'
+                                            $null=$CompactCommand | cmd
+                        }
+                        else {
+                            $command = [ScriptBlock]::Create("
+                            $CompactCommand | cmd
+                            ")
+                            $null = Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $DestinationCredential
+    
+                        }
+                    }
+                    catch {
+                        Stop-PSFFunction -Message "Couldn't Optimize vhd" -Target $imageName -ErrorRecord $_ -Continue
+                    }
+                }
+
             }
 
             # Write the data to the database
